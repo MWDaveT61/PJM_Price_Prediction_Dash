@@ -933,6 +933,31 @@ class HybridPJMPredictorAdvanced(BaseIntegratedPJMPredictor):
             return final_pred
 
 
+
+# =============================================================================
+# RUN ID AND ARGS LOGGING HELPERS
+# =============================================================================
+from datetime import datetime
+import uuid
+import hashlib
+
+def _namespace_to_dict(ns):
+    try:
+        return vars(ns)
+    except Exception:
+        # Fallback for plain dict or objects
+        try:
+            return dict(ns)
+        except Exception:
+            return {}
+
+def generate_run_id(args) -> str:
+    """Create a stable-ish unique id: YYYYMMDD_HHMMSS_<8char hash>"""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ad = _namespace_to_dict(args)
+    blob = json.dumps(ad, sort_keys=True, default=str)
+    h8 = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:8]
+    return f"{ts}_{h8}"
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -948,6 +973,10 @@ def run_advanced_dl_pipeline(args):
     print(f"DL Features: {args.n_dl_features}")
     print(f"Batch Size: {args.dl_batch_size}")
     print(f"Epochs: {args.dl_epochs}")
+    # Assign a unique run id for this training run
+    run_id = generate_run_id(args)
+    print(f"Run ID: {run_id}")
+
     print("="*70)
     
     # Monitor GPU
@@ -1100,35 +1129,52 @@ def run_advanced_dl_pipeline(args):
     }
     
     # Use the new save function
-    save_model_results(model, test_results)
+    save_model_results(model, test_results, run_id=run_id, args=args)
     
     print("\nModel and results saved successfully!")
-    print("To load the model later, use: model = load_saved_model('model_output_advanced_dl')")
+    print(f"To load the model later, use: model = load_saved_model('model_output_advanced_dl', run_id='{run_id}')")
     
     return model
     
     return model
 
-def save_model_results(model, test_results, output_dir='model_output_advanced_dl'):
+def save_model_results(model, test_results, output_dir='model_output_advanced_dl', run_id: str = None, args=None):
     """Save model and results without serialization errors"""
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
+    # Compute run-specific directory and suffix
+    if run_id is None:
+        run_id = generate_run_id(args if args is not None else {})
+    run_dir = os.path.join(output_dir, run_id)
+    os.makedirs(run_dir, exist_ok=True)
+    suffix = f"_{run_id}"
+    
+    # Save args from the launcher script for full reproducibility
+    try:
+        args_dict = _namespace_to_dict(args)
+        with open(os.path.join(run_dir, "run_args.json"), "w") as f:
+            json.dump(args_dict, f, indent=2, default=str)
+        with open(os.path.join(run_dir, "run_args.txt"), "w") as f:
+            f.write(repr(args))
+    except Exception as e:
+        print(f"Warning: could not write args snapshot: {e}")
+
     
     # 1. Save test results (these are just numbers, no issue)
-    joblib.dump(test_results, os.path.join(output_dir, 'test_results.pkl'))
+    joblib.dump(test_results, os.path.join(run_dir, f'test_results{suffix}.pkl'))
     
     # 2. Save traditional ML models (these serialize fine)
     if hasattr(model, 'xgb_model'):
-        joblib.dump(model.xgb_model, os.path.join(output_dir, 'xgb_model.pkl'))
+        joblib.dump(model.xgb_model, os.path.join(run_dir, f'xgb_model{suffix}.pkl'))
     if hasattr(model, 'lgb_model'):
-        joblib.dump(model.lgb_model, os.path.join(output_dir, 'lgb_model.pkl'))
+        joblib.dump(model.lgb_model, os.path.join(run_dir, f'lgb_model{suffix}.pkl'))
     if hasattr(model, 'rf_model'):
-        joblib.dump(model.rf_model, os.path.join(output_dir, 'rf_model.pkl'))
+        joblib.dump(model.rf_model, os.path.join(run_dir, f'rf_model{suffix}.pkl'))
     
     # 3. Save deep learning models (weights only, not the builder objects)
     if hasattr(model, 'dl_ensemble') and model.dl_ensemble is not None:
-        dl_dir = os.path.join(output_dir, 'deep_learning')
+        dl_dir = os.path.join(run_dir, f'deep_learning{suffix}')
         os.makedirs(dl_dir, exist_ok=True)
         
         # Save each DL model's weights
@@ -1136,7 +1182,7 @@ def save_model_results(model, test_results, output_dir='model_output_advanced_dl
             for name, dl_model in model.dl_ensemble.trained_models.items():
                 try:
                     # Save weights in the new Keras format
-                    weights_path = os.path.join(dl_dir, f'{name}_weights.weights.h5')
+                    weights_path = os.path.join(dl_dir, f'{name}_weights{suffix}.weights.h5')
                     dl_model.save_weights(weights_path)
                     print(f"Saved {name} weights to {weights_path}")
                 except Exception as e:
@@ -1152,40 +1198,44 @@ def save_model_results(model, test_results, output_dir='model_output_advanced_dl
             'model_types': list(model.dl_ensemble.models.keys()) if hasattr(model.dl_ensemble, 'models') else []
         }
         
-        with open(os.path.join(dl_dir, 'config.json'), 'w') as f:
+        with open(os.path.join(dl_dir, f'config{suffix}.json'), 'w') as f:
             json.dump(config, f)
         
         # Save scalers separately
         if hasattr(model.dl_ensemble, 'scalers'):
-            joblib.dump(model.dl_ensemble.scalers, os.path.join(dl_dir, 'scalers.pkl'))
+            joblib.dump(model.dl_ensemble.scalers, os.path.join(dl_dir, f'scalers{suffix}.pkl'))
     
     # 4. Save feature importance
     if hasattr(model, 'feature_importance'):
-        model.feature_importance.to_csv(os.path.join(output_dir, 'feature_importance.csv'))
+        model.feature_importance.to_csv(os.path.join(run_dir, f'feature_importance{suffix}.csv'))
     
     print(f"\nModel saved successfully to {output_dir}/")
     print(f"Test Results: MAE=${test_results['mae']:.2f}, RMSE=${test_results['rmse']:.2f}")
     
 
-def load_saved_model(output_dir='model_output_advanced_dl'):
+def load_saved_model(output_dir='model_output_advanced_dl', run_id: str = None):
     """Load the saved model components"""
     
-    # Initialize model
+    
+    # Determine run directory if provided
+    run_dir = output_dir if run_id is None else os.path.join(output_dir, run_id)
+    suffix = "" if run_id is None else f"_{run_id}"
+# Initialize model
     model = HybridPJMPredictorAdvanced()
     
     # Load traditional ML models
-    if os.path.exists(os.path.join(output_dir, 'xgb_model.pkl')):
-        model.xgb_model = joblib.load(os.path.join(output_dir, 'xgb_model.pkl'))
-    if os.path.exists(os.path.join(output_dir, 'lgb_model.pkl')):
-        model.lgb_model = joblib.load(os.path.join(output_dir, 'lgb_model.pkl'))
-    if os.path.exists(os.path.join(output_dir, 'rf_model.pkl')):
-        model.rf_model = joblib.load(os.path.join(output_dir, 'rf_model.pkl'))
+    if os.path.exists(os.path.join(run_dir, f'xgb_model{suffix}.pkl')):
+        model.xgb_model = joblib.load(os.path.join(run_dir, f'xgb_model{suffix}.pkl'))
+    if os.path.exists(os.path.join(run_dir, f'lgb_model{suffix}.pkl')):
+        model.lgb_model = joblib.load(os.path.join(run_dir, f'lgb_model{suffix}.pkl'))
+    if os.path.exists(os.path.join(run_dir, f'rf_model{suffix}.pkl')):
+        model.rf_model = joblib.load(os.path.join(run_dir, f'rf_model{suffix}.pkl'))
     
     # Load deep learning components
-    dl_dir = os.path.join(output_dir, 'deep_learning')
+    dl_dir = os.path.join(run_dir, f'deep_learning{suffix}')
     if os.path.exists(dl_dir):
         # Load config
-        with open(os.path.join(dl_dir, 'config.json'), 'r') as f:
+        with open(os.path.join(dl_dir, f'config{suffix}.json'), 'r') as f:
             config = json.load(f)
         
         # Initialize DL ensemble with config
@@ -1197,7 +1247,7 @@ def load_saved_model(output_dir='model_output_advanced_dl'):
         
         model.dl_ensemble.selected_features = config['selected_features']
         model.dl_ensemble.model_weights = config['model_weights']
-        model.dl_ensemble.scalers = joblib.load(os.path.join(dl_dir, 'scalers.pkl'))
+        model.dl_ensemble.scalers = joblib.load(os.path.join(dl_dir, f'scalers{suffix}.pkl'))
         
         # Rebuild and load each model
         model.dl_ensemble.trained_models = {}
@@ -1233,12 +1283,12 @@ def load_saved_model(output_dir='model_output_advanced_dl'):
         model.dl_ensemble.is_trained = len(model.dl_ensemble.trained_models) > 0
     
     # Load feature importance
-    if os.path.exists(os.path.join(output_dir, 'feature_importance.csv')):
-        model.feature_importance = pd.read_csv(os.path.join(output_dir, 'feature_importance.csv'))
+    if os.path.exists(os.path.join(run_dir, f'feature_importance{suffix}.csv')):
+        model.feature_importance = pd.read_csv(os.path.join(run_dir, f'feature_importance{suffix}.csv'))
     
     # Load test results
-    if os.path.exists(os.path.join(output_dir, 'test_results.pkl')):
-        test_results = joblib.load(os.path.join(output_dir, 'test_results.pkl'))
+    if os.path.exists(os.path.join(run_dir, f'test_results{suffix}.pkl')):
+        test_results = joblib.load(os.path.join(run_dir, f'test_results{suffix}.pkl'))
         print(f"Loaded model with test MAE: ${test_results['mae']:.2f}")
     
     return model

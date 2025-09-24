@@ -13,11 +13,11 @@ args = argparse.Namespace(
     # Advanced DL settings
     use_deep_learning=True,
     sequence_length=336,
-    n_dl_features=75,
-    dl_weight=0.35,
+    n_dl_features=125,
+    dl_weight=0.50,
     dl_epochs=30,
     dl_batch_size=16,
-    start_date='2018-01-01',    
+    start_date='2020-01-01',    
     test_days=75,               
     spike_threshold=125,        
     output_dir='model_output_advanced_dl',
@@ -302,7 +302,7 @@ test_results = {
 }
 
 # Use the save function from the model module
-from pjm_advanced_dl_model import save_model_results
+from pjm_advanced_dl_model_mac import save_model_results
 save_model_results(model, test_results, output_dir=args.output_dir)
 
 print(f"   Model saved successfully!")
